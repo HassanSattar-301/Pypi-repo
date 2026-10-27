@@ -1,142 +1,171 @@
+# APIMATIC Calculator SDK
 
-# Getting Started with Swagger Petstore - OpenAPI 3.0
+[![Built with APIMatic][apimatic-badge]][apimatic-url] [![License: MIT][license-badge]][license-url] [![Python 3.10+][python-badge]][python-url]
 
-## Introduction
+The APIMATIC Calculator SDK for Python provides access to the APIMATIC Calculator REST APIs from Python applications.
 
-Sample Pet Store Server based on the OpenAPI 3.0 specification.
+> [!TIP]
+> **Looking for a specific signature, model, enum, or error type?** This SDK ships a generated
+> **[SDK map](sdk-map.md)** -- a lookup index of the SDK's entire Python surface. Consult it before
+> scanning the source tree; details under [SDK map](#sdk-map).
 
-Find out more about Swagger: [https://swagger.io](https://swagger.io)
+Simple calculator API hosted on APIMATIC
 
-## Install the Package
+---
 
-The package is compatible with Python versions `3.7+`.
-Install the package from PyPi using the following pip command:
+## Installation
+
+To install the Python SDK from PyPI, with whichever package manager your project uses:
 
 ```bash
-pip install demo-vender==1.5.1
+pip install demo-vender
 ```
 
-You can also view the package at:
-https://pypi.python.org/pypi/demo-vender/1.5.1
+```bash
+uv add demo-vender
+```
 
-## Initialize the API Client
+```bash
+poetry add demo-vender
+```
 
-**_Note:_** Documentation for the client can be found [here.](doc/client.md)
+To install from the SDK source instead, give the tool a path containing a slash — a bare folder name is looked up on PyPI, and resolves to whatever project holds that name there:
 
-The following parameters are configurable for the API Client:
+```bash
+pip install <path-to-sdk>
+```
 
-| Parameter | Type | Description |
-|  --- | --- | --- |
-| environment | [`Environment`](README.md#environments) | The API environment. <br> **Default: `Environment.PRODUCTION`** |
-| http_client_instance | `Union[Session, HttpClientProvider]` | The Http Client passed from the sdk user for making requests |
-| override_http_client_configuration | `bool` | The value which determines to override properties of the passed Http Client from the sdk user |
-| http_call_back | `HttpCallBack` | The callback value that is invoked before and after an HTTP call is made to an endpoint |
-| timeout | `float` | The value to use for connection timeout. <br> **Default: 30** |
-| max_retries | `int` | The number of times to retry an endpoint call if it fails. <br> **Default: 0** |
-| backoff_factor | `float` | A backoff factor to apply between attempts after the second try. <br> **Default: 2** |
-| retry_statuses | `Array of int` | The http statuses on which retry is to be done. <br> **Default: [408, 413, 429, 500, 502, 503, 504, 521, 522, 524, 408, 413, 429, 500, 502, 503, 504, 521, 522, 524]** |
-| retry_methods | `Array of string` | The http methods on which retry is to be done. <br> **Default: ["GET", "PUT", "GET", "PUT"]** |
-| proxy_settings | [`ProxySettings`](doc/proxy-settings.md) | Optional proxy configuration to route HTTP requests through a proxy server. |
-| logging_configuration | [`LoggingConfiguration`](doc/logging-configuration.md) | The SDK logging configuration for API calls |
-| petstore_auth_credentials | [`PetstoreAuthCredentials`](doc/auth/oauth-2-implicit-grant.md) | The credential object for OAuth 2 Implicit Grant |
-| api_key_credentials | [`ApiKeyCredentials`](doc/auth/custom-header-signature.md) | The credential object for Custom Header Signature |
+---
 
-The API client can be initialized as follows:
+## Quick Start
 
-### Code-Based Client Initialization
+### Synchronous client
+
+Construct `ApimaticCalculatorClient` with keyword arguments, and call `close()` when you are done. Every argument is optional; the full list is in the [SDK map](sdk-map.md).
+
+```python
+from apimatic_calculator import ApimaticCalculatorClient
+
+client = ApimaticCalculatorClient()
+
+# TODO: call endpoints here -- see api-reference.md
+
+client.close()
+```
+
+Alternatively, scope it -- `with ApimaticCalculatorClient(...) as client:` closes the pool on exit; see [Best Practices](#best-practices).
+
+`Client` is exported as an alias of `ApimaticCalculatorClient`, so `from apimatic_calculator import Client` also works.
+
+The SDK accepts every model-typed input in two interchangeable spellings, both type-checked: the typed model, or a plain dict with the same keys -- the `OrDict` and `Model | ModelDict` unions in the [SDK map](sdk-map.md). Pick whichever suits the call site: the dict form needs no import, while the model form adds a keyword-checked constructor and editor completion.
+
+### Asynchronous client
+
+`AsyncApimaticCalculatorClient` mirrors `ApimaticCalculatorClient` with **identical method names**, and every endpoint method is a coroutine. It takes the same arguments, with some differences -- for example, the transport argument is `custom_async_http_client`.
+
+```python
+from asyncio import run
+
+from apimatic_calculator import AsyncApimaticCalculatorClient
+
+
+async def main() -> None:
+    client = AsyncApimaticCalculatorClient()
+    # TODO: call endpoints here, awaiting each -- see api-reference.md
+    await client.aclose()
+
+
+run(main())
+```
+
+Alternatively, scope it -- `async with AsyncApimaticCalculatorClient(...) as client:` closes the pool on exit. Only the async spelling is `aclose`, matching httpx2; see [Best Practices](#best-practices).
+
+`AsyncClient` is the exported alias. Each client accepts **only** its own transport argument; passing the other's is a `TypeError` at runtime and an error under mypy.
+
+---
+
+## Usage
+
+Two generated references cover the SDK; each answers a different question:
+
+| Reference | For |
+| --- | --- |
+| **[API Reference](api-reference.md)** | Usage guidance for a single **parsed** operation: `client.<group>.<operation>(...)` returns the typed payload and raises `ApiError` on any non-2xx, with `.error` the typed error body, or `RawError` for a status the operation does not document. |
+| **[Raw API Reference](raw-api-reference.md)** | The same for the **raw** variant: `client.<group>.with_raw_response.<operation>(...)` returns `ApiResult[T, E]` and never raises for an API error. |
+
+Both API references carry every one of the 1 operation, with a sync and an async sample and a parameter table each.
+
+## SDK map
+
+This SDK ships a generated **SDK map** -- [`sdk-map.md`](sdk-map.md) -- a deterministic, lookup-oriented table of contents of the SDK's Python surface, generated by APIMatic alongside this SDK.
+
+Consult the map before scanning or grepping the source: it answers call-level contract questions by lookup, and for anything it does not carry -- model shapes, enum values, an endpoint's route or behavioural prose -- it names the one source file to read. How to read the map itself, including the SDK-wide defaults its rows rely on, is stated at the top of [`sdk-map.md`](sdk-map.md).
+
+## Logging
+
+The SDK logs every HTTP exchange through Python's standard `logging` module, under the `apimatic_calculator` logger, and configures nothing itself: with no logging set up, nothing is printed unless `APIMATIC_CALCULATOR_LOG` is set. Turn it on as for any library:
 
 ```python
 import logging
 
-from swaggerpetstoreopenapi30.configuration import Environment
-from swaggerpetstoreopenapi30.http.auth.api_key import ApiKeyCredentials
-from swaggerpetstoreopenapi30.http.auth.petstore_auth import PetstoreAuthCredentials
-from swaggerpetstoreopenapi30.logging.configuration.api_logging_configuration import LoggingConfiguration
-from swaggerpetstoreopenapi30.logging.configuration.api_logging_configuration import RequestLoggingConfiguration
-from swaggerpetstoreopenapi30.logging.configuration.api_logging_configuration import ResponseLoggingConfiguration
-from swaggerpetstoreopenapi30.models.oauth_scope_petstore_auth import OauthScopePetstoreAuth
-from swaggerpetstoreopenapi30.swaggerpetstoreopenapi_30_client import Swaggerpetstoreopenapi30Client
+logging.basicConfig()  # your application's handler; the root stays at WARNING
+logging.getLogger("apimatic_calculator").setLevel(logging.INFO)  # the SDK's lines; DEBUG adds the dumps that logging_options turns on
+```
 
-client = Swaggerpetstoreopenapi30Client(
-    petstore_auth_credentials=PetstoreAuthCredentials(
-        oauth_client_id='OAuthClientId',
-        oauth_redirect_uri='OAuthRedirectUri',
-        oauth_scopes=[
-            OauthScopePetstoreAuth.WRITEPETS,
-            OauthScopePetstoreAuth.READPETS
-        ]
-    ),
-    api_key_credentials=ApiKeyCredentials(
-        api_key='api_key'
-    ),
-    environment=Environment.PRODUCTION,
-    logging_configuration=LoggingConfiguration(
-        log_level=logging.INFO,
-        request_logging_config=RequestLoggingConfiguration(
-            log_body=True
-        ),
-        response_logging_config=ResponseLoggingConfiguration(
-            log_headers=True
-        )
-    )
+Or set one environment variable before the process starts, for a run you cannot edit: `APIMATIC_CALCULATOR_LOG=info` writes the request and response lines, `APIMATIC_CALCULATOR_LOG=debug` adds the request headers, the request body and the response headers. If your application has configured logging, its handlers and format are used; otherwise the SDK writes to stderr.
+
+Choose the detail with `logging_options`, a `LoggingOptions` from `apimatic_calculator.core`:
+
+```python
+from apimatic_calculator import ApimaticCalculatorClient
+from apimatic_calculator.core import LoggingOptions
+
+client = ApimaticCalculatorClient(
+    logging_options=LoggingOptions(log_request_headers=True, log_response_headers=True, log_request_body=True)
 )
 ```
 
-### Environment-Based Client Initialization
+A plain dict with the same keys is accepted too, as for every model-typed argument (see [Quick Start](#quick-start)): `logging_options={"log_request_headers": True}`.
 
-```python
-from swaggerpetstoreopenapi30.swaggerpetstoreopenapi_30_client import Swaggerpetstoreopenapi30Client
+| Option | Default | Effect |
+| --- | --- | --- |
+| `log_request_headers` | `False` | Log the sent headers at DEBUG, masked. |
+| `log_response_headers` | `False` | Log the received headers at DEBUG, masked. |
+| `log_request_body` | `False` | Log the request body at DEBUG: its text when in memory, a description when streamed. |
+| `body_size_limit` | `32768` | Bytes of a logged body kept before it is cut. |
+| `redaction_placeholder` | `"REDACTED"` | What a hidden value prints as. |
+| `unmask_headers` | none | Header names to show although they are not on the safe list. |
+| `mask_headers` | none | Header names to hide although they are on the safe list. |
+| `mask_keys` | 11 credential names | Query and form keys whose values are always hidden; naming a set replaces the default. |
 
-# Specify the path to your .env file if it’s located outside the project’s root directory.
-client = Swaggerpetstoreopenapi30Client.from_environment(dotenv_path='/path/to/.env')
-```
+A single call can be quietened with `request_options={"log_level": logging.WARNING}`: records below that level are not written for that call. It never turns on a record the client's options leave off. Header, query and form values print `REDACTED` unless known safe; a JSON body is printed as sent, so enable `log_request_body` only where its content may be logged; a response body is never logged. The levels and every field are under **Logging** in the SDK map.
 
-See the [Environment-Based Client Initialization](doc/environment-based-client-initialization.md) section for details.
+## Best Practices
 
-## Environments
+> [!TIP]
+> Use a **single `ApimaticCalculatorClient` instance** for the lifetime of your application and reuse it across
+> all requests. Each instance owns its own connection pool, so an instance per request forfeits
+> connection reuse and leaks pools that are never closed.
 
-The SDK can be configured to use a different environment for making API calls. Available environments are:
+Match the disposal to the client's lifetime: an application-lifetime client is closed once at shutdown with `close()` / `aclose()`; where the lifetime fits a block, `with ApimaticCalculatorClient() as client:` / `async with AsyncApimaticCalculatorClient() as client:` releases it automatically. Both are idempotent, but a closed client is not reusable: the next call raises. The client closes **whatever transport it holds**, including one you supplied via `custom_http_client` / `custom_async_http_client`; if you intend to reuse your own transport across clients, don't hand its lifetime to a `with` block.
 
-### Fields
+**Retries are on by default**: a failed idempotent request — a retryable status or no response at all — is sent again up to three times before the call gives up. Pass `retry_options=0` to turn it off, for instance in a test that stubs an error response; the policy and its defaults are under **Retries** in the SDK map.
 
-| Name | Description |
-|  --- | --- |
-| PRODUCTION | **Default** |
+## License
 
-## Authorization
+This SDK is distributed under the [MIT License][license-url].
 
-This API uses the following authentication schemes.
+---
 
-* [`petstore_auth (OAuth 2 Implicit Grant)`](doc/auth/oauth-2-implicit-grant.md)
-* [`api_key (Custom Header Signature)`](doc/auth/custom-header-signature.md)
+## Support
 
-## List of APIs
+Refer to the [API reference](api-reference.md) for detailed information on available operations with code samples.
 
-* [Pet](doc/controllers/pet.md)
-* [Store](doc/controllers/store.md)
-* [User](doc/controllers/user.md)
+---
 
-## SDK Infrastructure
-
-### Configuration
-
-* [ProxySettings](doc/proxy-settings.md)
-* [Environment-Based Client Initialization](doc/environment-based-client-initialization.md)
-* [AbstractLogger](doc/abstract-logger.md)
-* [LoggingConfiguration](doc/logging-configuration.md)
-* [RequestLoggingConfiguration](doc/request-logging-configuration.md)
-* [ResponseLoggingConfiguration](doc/response-logging-configuration.md)
-
-### HTTP
-
-* [HttpResponse](doc/http-response.md)
-* [HttpRequest](doc/http-request.md)
-
-### Utilities
-
-* [ApiResponse](doc/api-response.md)
-* [ApiHelper](doc/api-helper.md)
-* [HttpDateTime](doc/http-date-time.md)
-* [RFC3339DateTime](doc/rfc3339-date-time.md)
-* [UnixDateTime](doc/unix-date-time.md)
-
+[license-url]: LICENSE
+[license-badge]: https://img.shields.io/badge/License-MIT-blue.svg
+[apimatic-url]: https://www.apimatic.io
+[apimatic-badge]: https://www.apimatic.io/hubfs/Built-with-APIMatic-badge.svg
+[python-url]: https://www.python.org/downloads/
+[python-badge]: https://img.shields.io/badge/python-3.10%2B-blue.svg
