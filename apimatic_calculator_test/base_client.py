@@ -9,7 +9,7 @@ from .server.server_config import ServerConfig
 DEFAULT_TIMEOUT = 30.0
 
 
-class BaseApimaticCalculatorClient(Generic[RawClientT]):
+class BaseApimaticCalculatorTestClient(Generic[RawClientT]):
     _raw_client: RawClientT
 
     def __init__(
@@ -24,4 +24,4 @@ class BaseApimaticCalculatorClient(Generic[RawClientT]):
             raise ValueError(f"timeout must be greater than 0; got {timeout!r}")
         self._server = Server(ServerConfig(base_url=base_url) if base_url is not None else ServerConfig())
         self._retry_options = RetryOptions.coerce(retry_options)
-        self._logging_options = LoggingOptions.coerce(logging_options, package="apimatic_calculator")
+        self._logging_options = LoggingOptions.coerce(logging_options, package="apimatic_calculator_test")

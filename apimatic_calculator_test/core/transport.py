@@ -63,11 +63,13 @@ class HttpResponse(Protocol):
 
     ``read`` is the seam the error path and every buffered decoder take, not a convenience over
     ``iter_bytes``: it must both buffer the whole body *and* release the connection, so a body
-    survives the close that frees the socket. Neither it nor ``iter_bytes`` may raise
-    :class:`~.exceptions.TransportError`: that type is ``send``'s alone, and the retry loop reads it
-    as "no response arrived". A body that fails once the head is in raises the library's own
-    exception, which propagates in both response modes -- re-sending would repeat work the server
-    has already done.
+    survives the close that frees the socket. Both it and ``iter_bytes`` MUST raise
+    :class:`~.exceptions.SdkConnectionError` -- :class:`~.exceptions.SdkTimeoutError` where the window
+    ran out -- for a body the transport could not deliver once the head is in: a dropped connection,
+    a read that timed out, a content-encoding it could not undo; naming the call as ``method`` and
+    ``safe_url(url)``, from the library's own exception. The retry loop never sees one, since its
+    ``try`` covers ``send`` alone, so work the server has already done is still never repeated;
+    ``execute`` and the streamed payloads close and let it pass, since it already names the call.
 
     ``iter_bytes`` re-chunks to ``chunk_size`` bytes when given an ``int``; given ``None`` it MUST yield
     each chunk as the network delivered it, buffering nothing of its own -- a latency-bound consumer such
@@ -79,12 +81,22 @@ class HttpResponse(Protocol):
     called it -- the belt that keeps a failed decode from stranding a socket."""
 
     @property
+    def method(self) -> HttpMethod:
+        """The method of the request this response answers.
+
+        Carried for the reason ``url`` is: a payload that outlives the call names the call in the
+        exception it raises, and has nowhere else to read it from."""
+        ...
+
+    @property
     def url(self) -> str:
         """The URL this response came from.
 
         Carried on the response rather than passed alongside it, because the payloads that outlive
         the call are the only readers and have no other way to name themselves once abandoned. It
-        is the URL the request asked for: the SDK never follows redirects."""
+        is the URL the request asked for, as the request spelled it -- never the library's own
+        normalised form -- so the call a payload names is the call the result names, byte for
+        byte; the SDK never follows redirects."""
         ...
 
     @property
@@ -103,12 +115,17 @@ class HttpResponse(Protocol):
 class AsyncHttpResponse(Protocol):
     """The awaited twin. ``aclose`` rather than ``close``, matching the SDK's async client.
 
-    ``url``, ``status_code`` and ``headers`` stay synchronous properties -- the head has already
-    arrived. Header names MUST be lowercased, the same rule the request side applies, and ``aread``
-    carries ``read``'s obligations: buffer the whole body, release the connection, and raise no
-    :class:`~.exceptions.TransportError` -- that type is ``send``'s alone. ``aclose`` carries
-    ``close``'s -- it MUST be idempotent, for the same double-close path. ``aiter_bytes``
-    carries ``iter_bytes``'s ``chunk_size`` contract, ``None`` included."""
+    ``method``, ``url``, ``status_code`` and ``headers`` stay synchronous properties -- the head has
+    already arrived. Header names MUST be lowercased, the same rule the request side applies, and
+    ``aread`` carries ``read``'s obligations: buffer the whole body, release the connection, and
+    raise :class:`~.exceptions.SdkConnectionError` for a body it could not deliver. ``aclose`` carries
+    ``close``'s -- it MUST be idempotent, for the same double-close path. ``aiter_bytes`` carries
+    ``iter_bytes``'s ``chunk_size`` contract, ``None`` included, and its failure contract."""
+
+    @property
+    def method(self) -> HttpMethod:
+        """The method of the request this response answers; see :attr:`HttpResponse.method`."""
+        ...
 
     @property
     def url(self) -> str:
@@ -149,13 +166,17 @@ class HttpClient(Protocol):
       among them, folded under the parameter layers when the request was built, so a caller's
       ``extra_headers`` has already won. The one label a transport writes is a multipart body's,
       whose boundary exists only once its encoder has minted it.
-    - MUST raise :class:`~.exceptions.TransportError` (``from <sdk>.core import TransportError``)
-      when a request produces no response at all -- a refused connection, a dropped one, a protocol
-      failure, a timeout -- or the retry loop never sees the failure, and MUST confine it to
-      this method: the returned response never raises one (see :class:`HttpResponse`). That is what lets the retry
-      loop and a caller both act on one shape whichever library moves the bytes; a loop that caught
-      the library's own exception would have to import it to say so. The library's exception belongs
-      on ``__cause__``, not swallowed.
+    - MUST raise :class:`~.exceptions.SdkConnectionError` (``from <sdk>.core import
+      SdkConnectionError``) when a request produces no response at all -- a refused connection, a
+      dropped one, a protocol failure -- and its leaf :class:`~.exceptions.SdkTimeoutError`, with the
+      window that elapsed as ``timeout``, when it was a timeout; or the retry loop never sees the
+      failure. Both name the call: ``method`` is ``request.method`` and ``url`` is
+      ``safe_url(request.url)`` (``from <sdk>.core import safe_url``), the query and userinfo dropped,
+      exactly as every result names it. The returned response owes the same for a failure *after* the
+      head (see :class:`HttpResponse`). That is what lets the retry loop and the runtime both act on
+      one shape whichever library moves the bytes; a loop that caught the library's own exception
+      would have to import it to say so. The library's exception belongs on ``__cause__``, not
+      swallowed.
     - SHOULD be idempotent for ``close()``."""
 
     def send(self, request: HttpRequest) -> HttpResponse:
@@ -171,8 +192,9 @@ class HttpClient(Protocol):
             The response head, its body pending, its header names lowercased.
 
         Raises:
-            TransportError: If the request produced no response. A failure *after* the head has
-                arrived belongs to the returned response, not here."""
+            SdkConnectionError: If the request produced no response; its leaf ``SdkTimeoutError`` for a
+                timeout. A failure *after* the head has arrived belongs to the returned response, not
+                here."""
         ...
 
     def close(self) -> None:
@@ -185,8 +207,8 @@ class AsyncHttpClient(Protocol):
 
     The same obligations apply, including honouring ``request.timeout``, lowercasing the
     response's header names, leaving the body unread, and translating a failed send into
-    :class:`~.exceptions.TransportError`. ``aclose`` rather than ``close`` matches the shipped
-    transport's HTTP library and the SDK's own async client.
+    :class:`~.exceptions.SdkConnectionError`. ``aclose`` rather than ``close`` matches the
+    shipped transport's HTTP library and the SDK's own async client.
 
     One obligation is this side's alone:
 
@@ -209,8 +231,9 @@ class AsyncHttpClient(Protocol):
             The response head, its body pending, its header names lowercased.
 
         Raises:
-            TransportError: If the request produced no response. A failure *after* the head has
-                arrived belongs to the returned response, not here."""
+            SdkConnectionError: If the request produced no response; its leaf ``SdkTimeoutError`` for a
+                timeout. A failure *after* the head has arrived belongs to the returned response, not
+                here."""
         ...
 
     async def aclose(self) -> None:

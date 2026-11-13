@@ -1,7 +1,10 @@
 [project]
-name = "demo-vender"
+name = "skill-verification-sdk"
 version = "2.3"
-description = "The official Python library for the APIMATIC Calculator API"
+description = "USE DEMO TO TEST SKILL"
+authors = [
+    { name = "Hassan", email = "hassan.sattar@apimatic.io" },
+]
 maintainers = [
     { name = "APIMatic", email = "support@apimatic.io" },
 ]
@@ -30,6 +33,9 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 
+[project.urls]
+Documentation = "https://doc.io"
+
 [dependency-groups]
 dev = [
     "mypy (>=2.2.0,<3.0.0)",
@@ -43,7 +49,7 @@ build-backend = "poetry.core.masonry.api"
 
 
 [tool.poetry]
-packages = [{ include = "apimatic_calculator" }]
+packages = [{ include = "apimatic_calculator_test" }]
 
 
 [tool.ruff]
@@ -60,7 +66,7 @@ ignore = [
 
 [tool.mypy]
 python_version = "3.10"         # the supported floor, not whichever interpreter is local
-files = ["apimatic_calculator"]
+files = ["apimatic_calculator_test"]
 strict = true
 warn_unreachable = true
 enable_error_code = ["redundant-expr", "truthy-bool", "ignore-without-code", "possibly-undefined"]

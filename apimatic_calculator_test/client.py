@@ -5,29 +5,29 @@ from types import TracebackType
 
 from typing_extensions import Self
 
-from .base_client import DEFAULT_TIMEOUT, BaseApimaticCalculatorClient
+from .base_client import DEFAULT_TIMEOUT, BaseApimaticCalculatorTestClient
 from .core import (
     OPERATING_SYSTEM,
     PYTHON_RUNTIME,
     ApiResult,
-    AsyncHttpClient,
-    AsyncHttpx2Client,
-    AsyncRawClient,
     BaseRawResponse,
+    HttpClient,
+    Httpx2Client,
     LoggingOptionsOrDict,
+    RawClient,
     RawError,
     RequestOptionsOrDict,
     RetryOptionsOrDict,
-    async_text_decoder,
     param,
     raw_error_response,
+    text_decoder,
     unwrap,
 )
 from .models.enums.operation_type import OperationTypeOrStr
 from .server.server import Server
 
 
-class AsyncApimaticCalculatorClient(BaseApimaticCalculatorClient[AsyncRawClient]):
+class ApimaticCalculatorTestClient(BaseApimaticCalculatorTestClient[RawClient]):
     def __init__(
         self,
         *,
@@ -35,19 +35,17 @@ class AsyncApimaticCalculatorClient(BaseApimaticCalculatorClient[AsyncRawClient]
         timeout: float = DEFAULT_TIMEOUT,
         retry_options: int | RetryOptionsOrDict | None = None,
         logging_options: LoggingOptionsOrDict | None = None,
-        custom_async_http_client: AsyncHttpClient | None = None,
+        custom_http_client: HttpClient | None = None,
     ) -> None:
         super().__init__(
             base_url=base_url, timeout=timeout, retry_options=retry_options, logging_options=logging_options
         )
-        self._raw_client = AsyncRawClient(
-            http_client=(
-                custom_async_http_client if custom_async_http_client is not None else AsyncHttpx2Client(timeout=timeout)
-            ),
+        self._raw_client = RawClient(
+            http_client=custom_http_client if custom_http_client is not None else Httpx2Client(timeout=timeout),
             retry_options=self._retry_options,
             logging_options=self._logging_options,
             global_headers=[
-                param[str]("User-Agent", "ApimaticCalculatorClient/2.3 Python"),
+                param[str]("User-Agent", "ApimaticCalculatorTestClient/2.3 Python"),
                 param[str]("X-APIMatic-Lang", "Python"),
                 param[str]("X-APIMatic-Package-Version", "2.3"),
                 param[str]("X-APIMatic-Gen-Version", "4.0.0"),
@@ -57,10 +55,10 @@ class AsyncApimaticCalculatorClient(BaseApimaticCalculatorClient[AsyncRawClient]
         )
 
     @cached_property
-    def with_raw_response(self) -> AsyncApiWithRawResponse:
-        return AsyncApiWithRawResponse(self._raw_client, self._server)
+    def with_raw_response(self) -> ApiWithRawResponse:
+        return ApiWithRawResponse(self._raw_client, self._server)
 
-    async def calculate(
+    def calculate(
         self, operation: OperationTypeOrStr, x: float, y: float, *, request_options: RequestOptionsOrDict | None = None
     ) -> float:
         """Calculates the expression using the specified operation.
@@ -73,26 +71,26 @@ class AsyncApimaticCalculatorClient(BaseApimaticCalculatorClient[AsyncRawClient]
                 count and statuses.
 
         Returns:
-            The result of the calculation
+            The deserialized ``float`` response.
 
         Raises:
             ApiError: If the API responds with an error status code. ``error`` is ``RawError``."""
-        return unwrap(await self.with_raw_response.calculate(operation, x, y, request_options=request_options))
+        return unwrap(self.with_raw_response.calculate(operation, x, y, request_options=request_options))
 
-    async def aclose(self) -> None:
-        await self._raw_client.http_client.aclose()
+    def close(self) -> None:
+        self._raw_client.http_client.close()
 
-    async def __aenter__(self) -> Self:
+    def __enter__(self) -> Self:
         return self
 
-    async def __aexit__(
+    def __exit__(
         self, exc_type: type[BaseException] | None, exc: BaseException | None, exc_tb: TracebackType | None
     ) -> None:
-        await self.aclose()
+        self.close()
 
 
-class AsyncApiWithRawResponse(BaseRawResponse[AsyncRawClient, Server]):
-    async def calculate(
+class ApiWithRawResponse(BaseRawResponse[RawClient, Server]):
+    def calculate(
         self, operation: OperationTypeOrStr, x: float, y: float, *, request_options: RequestOptionsOrDict | None = None
     ) -> ApiResult[float, RawError]:
         """Calculates the expression using the specified operation.
@@ -106,15 +104,15 @@ class AsyncApiWithRawResponse(BaseRawResponse[AsyncRawClient, Server]):
 
         Returns:
             An ``ApiResult`` holding the deserialized response or the error body."""
-        return await self._client.execute(
+        return self._client.execute(
             http_method="GET",
             url_template=self._server.default("/{operation}"),
             path_params=[param[OperationTypeOrStr]("operation", operation)],
             query_params=[param[float]("x", x), param[float]("y", y)],
-            decoder=async_text_decoder[float],
+            decoder=text_decoder[float],
             error_mapper=raw_error_response,
             request_options=request_options,
         )
 
 
-AsyncClient = AsyncApimaticCalculatorClient
+Client = ApimaticCalculatorTestClient

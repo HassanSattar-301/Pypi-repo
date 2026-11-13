@@ -6,12 +6,11 @@ successful page the loop calls ``advance`` with the page, its headers and the nu
 returned, read through ``items_selector``; ``advance`` returns the next state, or ``None`` to stop.
 
 States are frozen. ``advance`` returns a copy made with ``dataclasses.replace`` that changes only the moving
-value, so the selectors stay with the walk. The stop rules, and the order they are checked in, match the C#
-SDK. A state never advances to the value it just sent, so a server that keeps returning the same page ends
-the walk instead of looping forever. A selector over an ``OptionalNullable`` field may return ``UNSET``;
-every stop rule treats that as no answer. ``items_selector`` follows the same rule: it returns the items field
-as modelled, and ``None`` or ``UNSET`` -- a nullable or omitted array -- is a page with no items, read through
-``optionality.items_or_empty``.
+value, so the selectors stay with the walk. A state never advances to the value it just sent, so a server
+that keeps returning the same page ends the walk instead of looping forever. A selector over an
+``OptionalNullable`` field may return ``UNSET``; every stop rule treats that as no answer. ``items_selector``
+follows the same rule: it returns the items field as modelled, and ``None`` or ``UNSET`` -- a nullable or
+omitted array -- is a page with no items, read through ``optionality.items_or_empty``.
 
 An endpoint never names a state class. It calls a factory with the page model as a subscript, such as
 ``offset_state[Products](…)``. The subscript types the selectors, so a mistake inside one fails the build.

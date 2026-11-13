@@ -13,9 +13,9 @@ the stderr fallback, a handler that prints a record only where no other handler 
 
 The options are caller input and are validated once, at the client. What is written, and when, is
 the business of one object, :class:`HttpLog`: ``execute`` opens one per call and reports a call that
-ends in an exception, the callable that builds and sends an attempt reports each request to it, and the
-retry loop reports each response head and each retry. A token-endpoint request is logged like any other,
-because it runs through the same loop."""
+ends in an exception (but not a body its decoder or mapper rejects), the callable that builds and sends
+an attempt reports each request to it, and the retry loop reports each response head and each retry. A
+token-endpoint request is logged like any other, because it runs through the same loop."""
 
 from __future__ import annotations
 
@@ -191,8 +191,9 @@ LoggingOptionsOrDict: TypeAlias = LoggingOptions | LoggingOptionsDict
 class HttpLog:
     """One call's log scope: the attempt it last reported, and the four events that write its records.
 
-    ``execute`` opens one per call and reports a call that ends in an exception (:meth:`failed`); the callable that
-    builds and sends an attempt reports each request (:meth:`request_sending`); the retry loop reports each response
+    ``execute`` opens one per call and reports a call that ends in an exception (:meth:`failed`), except a body its
+    decoder or mapper rejects; the callable that builds and sends an attempt reports each request
+    (:meth:`request_sending`); the retry loop reports each response
     head, saying whether it is a success (:meth:`response_received`, which keeps no status rule of its own), and
     each retry (:meth:`retrying`). It is mutable for one reason: it remembers the method, the printable URL and the
     attempt count, so the loop never holds a request. Every record first asks :meth:`_is_enabled_for`, and a dump or
@@ -382,7 +383,7 @@ class HttpLog:
             extra=fields,
         )
 
-    def failed(self, error: Exception) -> None:
+    def failed(self, error: BaseException) -> None:
         # Before the first request is reported nothing reached the wire, and there is no URL to name.
         if self.attempts == 0 or not self._is_enabled_for(logging.ERROR):
             return

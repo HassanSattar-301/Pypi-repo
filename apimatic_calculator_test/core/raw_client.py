@@ -15,11 +15,11 @@ from datetime import datetime, timezone
 from typing import Any, Generic, TypeVar
 
 from ._internal.headers import resolve_headers
-from ._internal.urls import build_url, resolve_params
-from .auth import AsyncAuthScheme, AuthParams, AuthScheme, invalidate, no_auth, resolve_auth
+from ._internal.urls import build_url, resolve_params, safe_url
+from .auth import AnySchemesError, AsyncAuthScheme, AuthParams, AuthScheme, invalidate, no_auth, resolve_auth
 from .bodies import RequestBody, content_headers
 from .decoding import AsyncResponseDecoder, ErrorMapper, ResponseDecoder
-from .exceptions import TransportError
+from .exceptions import AuthSchemeError, ResponseDecodeError, SdkConnectionError
 from .logging import HttpLog, LoggingOptions
 from .params import Param, UrlTemplate
 from .request_options import RequestOptions, RequestOptionsOrDict, apply_retry_overrides
@@ -41,7 +41,7 @@ TransportT = TypeVar("TransportT", bound=HttpClient | AsyncHttpClient)
 
 @dataclass(frozen=True, slots=True)
 class BaseRawClient(Generic[TransportT]):
-    """Shared state for the raw clients, and the one place a request is composed from it.
+    """Shared state for the raw clients, and the one place a request is composed of it.
 
     The type parameter pins the one transport a flavor can use, so :class:`RawClient` is provably
     sync and :class:`AsyncRawClient` provably async. The ``global_*`` fields are spec-derived -- the
@@ -134,26 +134,49 @@ class RawClient(BaseRawClient[HttpClient]):
             headers: The endpoint's header parameters, if any.
             body: The request body, already wire-ready, or ``None``.
             auth_scheme: The scheme the operation declares; ``no_auth`` when it declares none.
-            decoder: The operation's 2xx decoder; ``empty_response`` when it declares no body.
+            decoder: The operation's 2xx decoder; ``empty_response`` when it declares no-body.
             error_mapper: The operation's error mapper; ``raw_error_response`` when it declares none.
             request_options: The caller's per-call overrides, if any.
 
         Returns:
             A :class:`Success` carrying the decoded payload for a 2xx status, otherwise a
-            :class:`Failure` carrying the decoded error body.
+            :class:`Failure` carrying the decoded error body; each names the call it answers.
 
         Raises:
-            ValueError: If the body does not deserialize; not an API error, so it propagates in both
-                response modes.
-            Exception: What the transport raised when the last attempt produced no response, or when
-                the body failed after the head arrived -- never the :class:`TransportError` wrapper."""
+            AuthSchemeError: If the operation's scheme could not supply its credential -- the token
+                endpoint refused or could not be reached, or a caller's own scheme raised; that failure
+                is the cause. For an OR requirement, every configured alternative raised: each failure is
+                in ``scheme_failures``, in order, and the group's ``AnySchemesError`` is the cause.
+            SdkConnectionError: If the last attempt produced no response, or the body failed after the
+                head arrived -- its leaf ``SdkTimeoutError`` where the window ran out. Raised by the
+                transport itself, naming the call; the library's own exception is the cause.
+            ResponseDecodeError: If a 2xx body, or a documented error body, is rejected by its declared
+                type; the decoder's own exception is the cause. Not an API error, so it propagates in
+                both response modes.
+            Exception: Anything else as it was raised -- a scheme's, a caller's decoder's, a log
+                handler's."""
         options = RequestOptions.coerce(request_options)
         retry_options = apply_retry_overrides(options, self.retry_options)
+        # The safe URL every result and exception carries: the template with its path parameters rendered, cut to
+        # the path -- no query, no userinfo -- so nothing a parameter or a scheme places in a query reaches a
+        # message. No query is rendered here, since the cut would drop it; send() renders the full URL, auth's
+        # query params included, per attempt.
+        call_url = safe_url(build_url(url_template, path_params=resolve_params(self.global_path_params, path_params)))
         log = HttpLog(
             options=self.logging_options, log_level_override=options.log_level, started_at=time.perf_counter()
         )
 
         def send() -> HttpResponse:
+            try:
+                auth = auth_scheme.apply()
+            except Exception as error:
+                # A token endpoint down or refusing, a caller's scheme raising, or every OR alternative failing.
+                raise AuthSchemeError(
+                    f"{http_method} {call_url} could not be authenticated: {error}",
+                    method=http_method,
+                    url=call_url,
+                    scheme_failures=error.scheme_failures if isinstance(error, AnySchemesError) else (error,),
+                ) from error
             request = self._build_request(
                 http_method=http_method,
                 url_template=url_template,
@@ -161,7 +184,7 @@ class RawClient(BaseRawClient[HttpClient]):
                 query_params=query_params,
                 headers=headers,
                 body=body,
-                auth=auth_scheme.apply(),
+                auth=auth,
                 options=options,
             )
             log.request_sending(request)
@@ -175,15 +198,20 @@ class RawClient(BaseRawClient[HttpClient]):
                 send=send,
                 log=log,
             )
+        except SdkConnectionError as error:
+            # No response on the last attempt. Logged as the library's exception on ``__cause__``, which may be None
+            # where custom transport chained nothing, so the error itself stands in.
+            log.failed(error.__cause__ or error)
+            raise
         except Exception as error:
-            # No response was kept: the last attempt's transport error, already unwrapped, or anything raised while
-            # an attempt was built, sent or its head handled. ``failed`` writes nothing when no request was reported.
-            # A BaseException -- the caller's cancellation -- is not this call failing, and passes untouched.
+            # Auth failing, a param rejected by its type, an upload that won't open, or a custom transport or log
+            # handler raising; ``failed`` is a no-op before the first request. Cancellation isn't caught.
             log.failed(error)
             raise
 
+        # Bound before the try, so every arm below may name them; the loop has already read both once.
+        status_code, response_headers = response.status_code, dict(response.headers)
         try:
-            status_code, response_headers = response.status_code, dict(response.headers)
             if 200 <= status_code < 300:
                 # Returns before the read: the body is the decoder's now. The excepts below must never
                 # become a finally -- they would close the connection a FileResponse was just handed.
@@ -191,6 +219,8 @@ class RawClient(BaseRawClient[HttpClient]):
                     payload=decoder.decode(response),
                     status_code=status_code,
                     headers=response_headers,
+                    method=http_method,
+                    url=call_url,
                 )
 
             content = response.read()
@@ -201,15 +231,25 @@ class RawClient(BaseRawClient[HttpClient]):
                 error=error_mapper.map(status_code, content),
                 status_code=status_code,
                 headers=response_headers,
+                method=http_method,
+                url=call_url,
             )
-        except Exception as error:
-            # After the head: a body read the transport refused, a body the decoder rejected, an error body the
-            # mapper rejected -- each this call producing no result. Closed before the line is written.
+        except SdkConnectionError as error:
+            # The body read failed after the head: dropped mid-body, timed out, or bad encoding. Logged as its cause.
             response.close()
-            log.failed(error)
+            log.failed(error.__cause__ or error)
             raise
+        except ValueError as error:
+            # Only the decoder and the mapper raise it here -- parse_json's ValueError, pydantic's ValidationError,
+            # _decode_utf8's UnicodeDecodeError -- since transport's read raises SdkConnectionError by obligation.
+            # Not logged: only a body read that failed writes the failed line.
+            response.close()
+            raise ResponseDecodeError(
+                method=http_method, url=call_url, status_code=status_code, headers=response_headers
+            ) from error
         except BaseException:
-            # The caller's cancellation or interrupt: closed, and not logged as this call's failure.
+            # A decoder or mapper raising anything else, custom transport's read raising its own error, or the
+            # caller's cancellation or interrupt: closed, and not logged.
             response.close()
             raise
 
@@ -246,19 +286,20 @@ class RawClient(BaseRawClient[HttpClient]):
             The kept attempt's response, open and its body unread.
 
         Raises:
-            Exception: What the transport raised when the last attempt produced no response; the
-                :class:`TransportError` wrapper is unwrapped and its ``inner_exception`` raised in
-                its place."""
+            SdkConnectionError: The transport's own, from the last attempt, once every gate has refused;
+                it names the call already, so ``execute`` logs it and lets it pass."""
         for retries_taken in range(retry_options.max_retries + 1):
             try:
                 response = send()
-            except TransportError as error:
-                # No response arrived, so there is nothing to close.
-                inner = error.inner_exception
+            except SdkConnectionError as error:
+                # No response arrived, so there is nothing to close. The one shape transport owes for a failed
+                # send, whichever library moved the bytes, and a timeout is its leaf, so the same gates read it.
+                # Once they refuse, the exception leaves as it is: it names the call, and ``execute`` logs it.
                 if retries_taken >= retry_options.max_retries or not is_retryable:
-                    raise inner from inner.__cause__
+                    raise
                 wait_seconds = backoff_seconds(retries_taken, retry_options)
-                log.retrying(max_retries=retry_options.max_retries, delay=wait_seconds, reason=inner)
+                # ``__cause__`` may be None where a custom transport chained nothing.
+                log.retrying(max_retries=retry_options.max_retries, delay=wait_seconds, reason=error.__cause__ or error)
                 time.sleep(wait_seconds)
                 continue
 
@@ -334,26 +375,49 @@ class AsyncRawClient(BaseRawClient[AsyncHttpClient]):
             headers: The endpoint's header parameters, if any.
             body: The request body, already wire-ready, or ``None``.
             auth_scheme: The scheme the operation declares; ``no_auth`` when it declares none.
-            decoder: The operation's 2xx decoder; ``empty_response`` when it declares no body.
+            decoder: The operation's 2xx decoder; ``empty_response`` when it declares no-body.
             error_mapper: The operation's error mapper; ``raw_error_response`` when it declares none.
             request_options: The caller's per-call overrides, if any.
 
         Returns:
             A :class:`Success` carrying the decoded payload for a 2xx status, otherwise a
-            :class:`Failure` carrying the decoded error body.
+            :class:`Failure` carrying the decoded error body; each names the call it answers.
 
         Raises:
-            ValueError: If the body does not deserialize; not an API error, so it propagates in both
-                response modes.
-            Exception: What the transport raised when the last attempt produced no response, or when
-                the body failed after the head arrived -- never the :class:`TransportError` wrapper."""
+            AuthSchemeError: If the operation's scheme could not supply its credential -- the token
+                endpoint refused or could not be reached, or a caller's own scheme raised; that failure
+                is the cause. For an OR requirement, every configured alternative raised: each failure is
+                in ``scheme_failures``, in order, and the group's ``AnySchemesError`` is the cause.
+            SdkConnectionError: If the last attempt produced no response, or the body failed after the
+                head arrived -- its leaf ``SdkTimeoutError`` where the window ran out. Raised by the
+                transport itself, naming the call; the library's own exception is the cause.
+            ResponseDecodeError: If a 2xx body, or a documented error body, is rejected by its declared
+                type; the decoder's own exception is the cause. Not an API error, so it propagates in
+                both response modes.
+            Exception: Anything else as it was raised -- a scheme's, a caller's decoder's, a log
+                handler's."""
         options = RequestOptions.coerce(request_options)
         retry_options = apply_retry_overrides(options, self.retry_options)
+        # The safe URL every result and exception carries: the template with its path parameters rendered, cut to
+        # the path -- no query, no userinfo -- so nothing a parameter or a scheme places in a query reaches a
+        # message. No query is rendered here, since the cut would drop it; send() renders the full URL, auth's
+        # query params included, per attempt.
+        call_url = safe_url(build_url(url_template, path_params=resolve_params(self.global_path_params, path_params)))
         log = HttpLog(
             options=self.logging_options, log_level_override=options.log_level, started_at=time.perf_counter()
         )
 
         async def send() -> AsyncHttpResponse:
+            try:
+                auth = await resolve_auth(auth_scheme)
+            except Exception as error:
+                # A token endpoint down or refusing, a caller's scheme raising, or every OR alternative failing.
+                raise AuthSchemeError(
+                    f"{http_method} {call_url} could not be authenticated: {error}",
+                    method=http_method,
+                    url=call_url,
+                    scheme_failures=error.scheme_failures if isinstance(error, AnySchemesError) else (error,),
+                ) from error
             request = self._build_request(
                 http_method=http_method,
                 url_template=url_template,
@@ -361,7 +425,7 @@ class AsyncRawClient(BaseRawClient[AsyncHttpClient]):
                 query_params=query_params,
                 headers=headers,
                 body=body,
-                auth=await resolve_auth(auth_scheme),
+                auth=auth,
                 options=options,
             )
             log.request_sending(request)
@@ -375,15 +439,20 @@ class AsyncRawClient(BaseRawClient[AsyncHttpClient]):
                 send=send,
                 log=log,
             )
+        except SdkConnectionError as error:
+            # No response on the last attempt. Logged as the library's exception on ``__cause__``, which may be None
+            # where custom transport chained nothing, so the error itself stands in.
+            log.failed(error.__cause__ or error)
+            raise
         except Exception as error:
-            # No response was kept: the last attempt's transport error, already unwrapped, or anything raised while
-            # an attempt was built, sent or its head handled. ``failed`` writes nothing when no request was reported.
-            # A BaseException -- the caller's cancellation -- is not this call failing, and passes untouched.
+            # Auth failing, a param rejected by its type, an upload that won't open, or a custom transport or log
+            # handler raising; ``failed`` is a no-op before the first request. Cancellation isn't caught.
             log.failed(error)
             raise
 
+        # Bound before the try, so every arm below may name them; the loop has already read both once.
+        status_code, response_headers = response.status_code, dict(response.headers)
         try:
-            status_code, response_headers = response.status_code, dict(response.headers)
             if 200 <= status_code < 300:
                 # Returns before the read: the body is the decoder's now. The excepts below must never
                 # become a finally -- they would close the connection an AsyncFileResponse was just handed.
@@ -391,6 +460,8 @@ class AsyncRawClient(BaseRawClient[AsyncHttpClient]):
                     payload=await decoder.decode(response),
                     status_code=status_code,
                     headers=response_headers,
+                    method=http_method,
+                    url=call_url,
                 )
 
             content = await response.aread()
@@ -401,15 +472,25 @@ class AsyncRawClient(BaseRawClient[AsyncHttpClient]):
                 error=error_mapper.map(status_code, content),
                 status_code=status_code,
                 headers=response_headers,
+                method=http_method,
+                url=call_url,
             )
-        except Exception as error:
-            # After the head: a body read the transport refused, a body the decoder rejected, an error body the
-            # mapper rejected -- each this call producing no result. Closed before the line is written.
+        except SdkConnectionError as error:
+            # The body read failed after the head: dropped mid-body, timed out, or bad encoding. Logged as its cause.
             await response.aclose()
-            log.failed(error)
+            log.failed(error.__cause__ or error)
             raise
+        except ValueError as error:
+            # Only the decoder and the mapper raise it here -- parse_json's ValueError, pydantic's ValidationError,
+            # _decode_utf8's UnicodeDecodeError -- since transport's read raises SdkConnectionError by obligation.
+            # Not logged: only a body read that failed writes the failed line.
+            await response.aclose()
+            raise ResponseDecodeError(
+                method=http_method, url=call_url, status_code=status_code, headers=response_headers
+            ) from error
         except BaseException:
-            # The caller's cancellation or interrupt: closed, and not logged as this call's failure.
+            # A decoder or mapper raising anything else, custom transport's read raising its own error, or the
+            # caller's cancellation or interrupt: closed, and not logged.
             await response.aclose()
             raise
 
@@ -429,13 +510,15 @@ class AsyncRawClient(BaseRawClient[AsyncHttpClient]):
         for retries_taken in range(retry_options.max_retries + 1):
             try:
                 response = await send()
-            except TransportError as error:
-                # No response arrived, so there is nothing to close.
-                inner = error.inner_exception
+            except SdkConnectionError as error:
+                # No response arrived, so there is nothing to close. The one shape transport owes for a failed
+                # send, whichever library moved the bytes, and a timeout is its leaf, so the same gates read it.
+                # Once they refuse, the exception leaves as it is: it names the call, and ``execute`` logs it.
                 if retries_taken >= retry_options.max_retries or not is_retryable:
-                    raise inner from inner.__cause__
+                    raise
                 wait_seconds = backoff_seconds(retries_taken, retry_options)
-                log.retrying(max_retries=retry_options.max_retries, delay=wait_seconds, reason=inner)
+                # ``__cause__`` may be None where a custom transport chained nothing.
+                log.retrying(max_retries=retry_options.max_retries, delay=wait_seconds, reason=error.__cause__ or error)
                 await asyncio.sleep(wait_seconds)
                 continue
 

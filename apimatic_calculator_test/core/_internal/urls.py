@@ -1,10 +1,11 @@
 """Turning a :class:`UrlTemplate` plus parameters into a request URL.
 
-Five pure functions in four groups. :func:`resolve_params` combines the parameters an API applies
-to every request with the ones a single call declares; :func:`render_segments` turns each of those
-into the URL segments it contributes, reading its declared type; :func:`build_url` then renders the
-result, with server variables filling the base URL's placeholders, path parameters filling the
-path's, and query parameters flattened and encoded onto the end. Resolution stays separate from
+Six pure functions. :func:`resolve_params` combines the parameters an API applies to every request
+with the ones a single call declares; :func:`render_segments` turns each of those into the URL
+segments it contributes, reading its declared type; :func:`build_url` then renders the result, with
+server variables filling the base URL's placeholders, path parameters filling the path's, and query
+parameters flattened and encoded onto the end; :func:`safe_url` cuts a rendered URL to the call every
+result and exception names. Resolution stays separate from
 rendering so each can be tested on its own, and none of the six holds state -- there is nothing to
 configure, so there is nothing to construct."""
 
@@ -13,7 +14,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 from typing import Any, Final
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 
 from ..params import Param, UrlTemplate
 from .flattening import flatten
@@ -170,3 +171,24 @@ def build_url(
 
     query = urlencode_params(query_params)
     return f"{url}?{query}" if query else url
+
+
+def safe_url(url: str) -> str:
+    """The safe form of ``url``: ``scheme://host[:port]/path``, with the userinfo, the query and the fragment dropped.
+
+    What every result and every member of the exception family carries as ``url`` (ADR-0072), so nothing a
+    parameter or a scheme places in the query can reach a message or a repr. ``execute`` applies it to the URL
+    :func:`build_url` rendered from the template and the endpoint's own parameters; a payload that outlives the
+    call -- a :class:`~..file_responses.FileResponse`, an :class:`~..event_streams.EventStream` -- applies it to
+    the response's URL, having no template to build from, and so names the call exactly as the result does.
+
+    Args:
+        url: A request URL, as built or as a response reports it.
+
+    Returns:
+        ``scheme://host[:port]/path``, or ``<unparseable url>`` where ``urlsplit`` refuses."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return "<unparseable url>"
+    return urlunsplit(parts._replace(netloc=parts.netloc.rpartition("@")[2], query="", fragment=""))
