@@ -174,6 +174,53 @@ A plain dict with the same keys is accepted too, as for every model-typed argume
 
 A single call can be quietened with `request_options={"log_level": logging.WARNING}`: records below that level are not written for that call. It never turns on a record the client's options leave off. Header, query and form values print `REDACTED` unless known safe; a JSON body is printed as sent, so enable `log_request_body` only where its content may be logged; a response body is never logged. The levels and every field are under **Logging** in the SDK map.
 
+## Hooks
+
+A hook is your code run on every attempt of every request. `before_request` gets the request after it is built and authenticated, and returns the request to send. `after_response` gets the response and returns the one the call acts on: the same one, or your own object implementing `HttpResponse`. Subclass `SdkHook` and override either one, or pass plain functions keyed by the event they run on:
+
+```python
+from dataclasses import replace
+
+from apimatic_calculator_test import ApimaticCalculatorTestClient
+from apimatic_calculator_test.core import HookContext, HttpRequest, HttpResponse, SdkHook
+
+
+# new_traceparent() and record() stand for your own tracer and metrics sink.
+class Tracing(SdkHook):
+    def before_request(self, request: HttpRequest, context: HookContext) -> HttpRequest:
+        return replace(request, headers={**request.headers, "traceparent": new_traceparent()})
+
+    def after_response(self, response: HttpResponse, context: HookContext) -> HttpResponse:
+        record(context.method, context.url, response.status_code)
+        return response
+
+
+client = ApimaticCalculatorTestClient(hooks=[Tracing()])
+
+
+# Or plain functions, with nothing to subclass:
+def add_tenant(request: HttpRequest, context: HookContext) -> HttpRequest:
+    return replace(request, headers={**request.headers, "x-tenant": "acme"})
+
+
+def print_status(response: HttpResponse, context: HookContext) -> HttpResponse:
+    print(context.method, response.status_code)
+    return response
+
+
+client = ApimaticCalculatorTestClient(hooks={"on_request": [add_tenant], "on_response": [print_status]})
+```
+
+A single call adds its own the same way, `request_options={"hooks": {"on_request": [add_tenant]}}` or `{"hooks": [Tracing()]}`: they run after the client's, never instead of them.
+
+**Two spellings, one per place.** `hooks` takes a list of hook objects or the `{"on_request": [...], "on_response": [...]}` dict, on the client and in `request_options` alike — not a mix of the two in one place. A hook that keeps state between the request and its response is a class. A key other than those two is a type error, and is ignored at run time.
+
+**When they run.** On every attempt, retries included, after authentication: the client's hooks, then the call's.
+
+**On `AsyncApimaticCalculatorTestClient`** the same shape is `AsyncSdkHook`, whose methods are `async def` and take an `AsyncHookContext` and an `AsyncHttpResponse`; the dict takes `async def` functions under the same two keys, and a call's hooks go in `AsyncRequestOptions`. A hook of the other client's flavour is a type error, not a run-time check.
+
+**Changing the response.** The retry decision and the result read the response the last hook returns; the log line shows what the server sent. A hook that reads the body must return a response that still carries it, and one that returns a different response must close the original or keep it inside.
+
 ## Best Practices
 
 > [!TIP]

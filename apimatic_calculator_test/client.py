@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from functools import cached_property
 from types import TracebackType
 
@@ -18,6 +19,8 @@ from .core import (
     RawError,
     RequestOptionsOrDict,
     RetryOptionsOrDict,
+    SdkHook,
+    SdkHooksDict,
     param,
     raw_error_response,
     text_decoder,
@@ -35,6 +38,7 @@ class ApimaticCalculatorTestClient(BaseApimaticCalculatorTestClient[RawClient]):
         timeout: float = DEFAULT_TIMEOUT,
         retry_options: int | RetryOptionsOrDict | None = None,
         logging_options: LoggingOptionsOrDict | None = None,
+        hooks: Sequence[SdkHook] | SdkHooksDict | None = None,
         custom_http_client: HttpClient | None = None,
     ) -> None:
         super().__init__(
@@ -44,6 +48,7 @@ class ApimaticCalculatorTestClient(BaseApimaticCalculatorTestClient[RawClient]):
             http_client=custom_http_client if custom_http_client is not None else Httpx2Client(timeout=timeout),
             retry_options=self._retry_options,
             logging_options=self._logging_options,
+            hooks=hooks if hooks is not None else [],
             global_headers=[
                 param[str]("User-Agent", "ApimaticCalculatorTestClient/2.3 Python"),
                 param[str]("X-APIMatic-Lang", "Python"),

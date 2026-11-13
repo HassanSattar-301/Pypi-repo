@@ -159,6 +159,14 @@ from .files import (
     FileInput,
     NamedFile,
 )
+from .hooks import (
+    AsyncHookContext,
+    AsyncSdkHook,
+    AsyncSdkHooksDict,
+    HookContext,
+    SdkHook,
+    SdkHooksDict,
+)
 from .httpx2_transport import AsyncHttpx2Client, Httpx2Client
 from .logging import LoggingOptions, LoggingOptionsDict, LoggingOptionsOrDict
 from .models import SdkBaseModel
@@ -179,7 +187,14 @@ from .raw_client import (
     RawClient,
     RawClientT,
 )
-from .request_options import RequestOptions, RequestOptionsDict, RequestOptionsOrDict
+from .request_options import (
+    AsyncRequestOptions,
+    AsyncRequestOptionsDict,
+    AsyncRequestOptionsOrDict,
+    RequestOptions,
+    RequestOptionsDict,
+    RequestOptionsOrDict,
+)
 from .results import ApiResult, Failure, RawError, Success, unwrap
 from .retries import RetryOptions, RetryOptionsDict, RetryOptionsOrDict
 from .runtime_env import OPERATING_SYSTEM, PYTHON_RUNTIME
@@ -253,6 +268,16 @@ __all__ = [
     "RequestOptions",
     "RequestOptionsDict",
     "RequestOptionsOrDict",
+    "AsyncRequestOptions",
+    "AsyncRequestOptionsDict",
+    "AsyncRequestOptionsOrDict",
+    # Hooks
+    "SdkHook",
+    "AsyncSdkHook",
+    "HookContext",
+    "AsyncHookContext",
+    "SdkHooksDict",
+    "AsyncSdkHooksDict",
     # Retries
     "RetryOptions",
     "RetryOptionsDict",

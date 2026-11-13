@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from functools import cached_property
 from types import TracebackType
 
@@ -13,10 +14,12 @@ from .core import (
     AsyncHttpClient,
     AsyncHttpx2Client,
     AsyncRawClient,
+    AsyncRequestOptionsOrDict,
+    AsyncSdkHook,
+    AsyncSdkHooksDict,
     BaseRawResponse,
     LoggingOptionsOrDict,
     RawError,
-    RequestOptionsOrDict,
     RetryOptionsOrDict,
     async_text_decoder,
     param,
@@ -35,6 +38,7 @@ class AsyncApimaticCalculatorTestClient(BaseApimaticCalculatorTestClient[AsyncRa
         timeout: float = DEFAULT_TIMEOUT,
         retry_options: int | RetryOptionsOrDict | None = None,
         logging_options: LoggingOptionsOrDict | None = None,
+        hooks: Sequence[AsyncSdkHook] | AsyncSdkHooksDict | None = None,
         custom_async_http_client: AsyncHttpClient | None = None,
     ) -> None:
         super().__init__(
@@ -46,6 +50,7 @@ class AsyncApimaticCalculatorTestClient(BaseApimaticCalculatorTestClient[AsyncRa
             ),
             retry_options=self._retry_options,
             logging_options=self._logging_options,
+            hooks=hooks if hooks is not None else [],
             global_headers=[
                 param[str]("User-Agent", "ApimaticCalculatorTestClient/2.3 Python"),
                 param[str]("X-APIMatic-Lang", "Python"),
@@ -61,7 +66,12 @@ class AsyncApimaticCalculatorTestClient(BaseApimaticCalculatorTestClient[AsyncRa
         return AsyncApiWithRawResponse(self._raw_client, self._server)
 
     async def calculate(
-        self, operation: OperationTypeOrStr, x: float, y: float, *, request_options: RequestOptionsOrDict | None = None
+        self,
+        operation: OperationTypeOrStr,
+        x: float,
+        y: float,
+        *,
+        request_options: AsyncRequestOptionsOrDict | None = None,
     ) -> float:
         """Calculates the expression using the specified operation.
 
@@ -93,7 +103,12 @@ class AsyncApimaticCalculatorTestClient(BaseApimaticCalculatorTestClient[AsyncRa
 
 class AsyncApiWithRawResponse(BaseRawResponse[AsyncRawClient, Server]):
     async def calculate(
-        self, operation: OperationTypeOrStr, x: float, y: float, *, request_options: RequestOptionsOrDict | None = None
+        self,
+        operation: OperationTypeOrStr,
+        x: float,
+        y: float,
+        *,
+        request_options: AsyncRequestOptionsOrDict | None = None,
     ) -> ApiResult[float, RawError]:
         """Calculates the expression using the specified operation.
 

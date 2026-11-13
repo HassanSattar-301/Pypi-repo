@@ -20,9 +20,26 @@ from .auth import AnySchemesError, AsyncAuthScheme, AuthParams, AuthScheme, inva
 from .bodies import RequestBody, content_headers
 from .decoding import AsyncResponseDecoder, ErrorMapper, ResponseDecoder
 from .exceptions import AuthSchemeError, ResponseDecodeError, SdkConnectionError
+from .hooks import (
+    AsyncHookContext,
+    AsyncSdkHook,
+    AsyncSdkHooksDict,
+    HookContext,
+    SdkHook,
+    SdkHooksDict,
+    _async_coerce_hooks,
+    _coerce_hooks,
+)
 from .logging import HttpLog, LoggingOptions
 from .params import Param, UrlTemplate
-from .request_options import RequestOptions, RequestOptionsOrDict, apply_retry_overrides
+from .request_options import (
+    AsyncRequestOptions,
+    AsyncRequestOptionsOrDict,
+    BaseRequestOptions,
+    RequestOptions,
+    RequestOptionsOrDict,
+    apply_retry_overrides,
+)
 from .results import ApiResult, Failure, Success
 from .retries import RetryOptions, backoff_seconds, is_retryable_body, retry_after_seconds
 from .transport import (
@@ -76,7 +93,7 @@ class BaseRawClient(Generic[TransportT]):
         headers: Sequence[Param[Any]] | None,
         body: RequestBody | None,
         auth: AuthParams,
-        options: RequestOptions,
+        options: BaseRequestOptions,
     ) -> HttpRequest:
         """Resolve the API-wide, endpoint, auth and caller layers into one request, the body's own
         label beneath them all."""
@@ -103,6 +120,10 @@ class BaseRawClient(Generic[TransportT]):
 @dataclass(frozen=True, slots=True)
 class RawClient(BaseRawClient[HttpClient]):
     """Synchronous raw client: builds the request, sends it, shapes the result."""
+
+    hooks: Sequence[SdkHook] | SdkHooksDict = ()
+    """The client's hooks, run on every attempt of every call -- before the call's own: hook objects, or plain
+    functions keyed by event. Resolved into hooks by ``execute``, once per call."""
 
     def execute(
         self,
@@ -149,22 +170,34 @@ class RawClient(BaseRawClient[HttpClient]):
                 in ``scheme_failures``, in order, and the group's ``AnySchemesError`` is the cause.
             SdkConnectionError: If the last attempt produced no response, or the body failed after the
                 head arrived -- its leaf ``SdkTimeoutError`` where the window ran out. Raised by the
-                transport itself, naming the call; the library's own exception is the cause.
+                transport itself, naming the call; the library's own exception is the cause. A hook's
+                ``before_request`` may raise one too, to have its attempt retried as a failed send; raised
+                from ``after_response`` it ends the call unretried.
             ResponseDecodeError: If a 2xx body, or a documented error body, is rejected by its declared
                 type; the decoder's own exception is the cause. Not an API error, so it propagates in
                 both response modes.
             Exception: Anything else as it was raised -- a scheme's, a caller's decoder's, a log
-                handler's."""
+                handler's, a hook's."""
         options = RequestOptions.coerce(request_options)
         retry_options = apply_retry_overrides(options, self.retry_options)
-        # The safe URL every result and exception carries: the template with its path parameters rendered, cut to
-        # the path -- no query, no userinfo -- so nothing a parameter or a scheme places in a query reaches a
-        # message. No query is rendered here, since the cut would drop it; send() renders the full URL, auth's
-        # query params included, per attempt.
-        call_url = safe_url(build_url(url_template, path_params=resolve_params(self.global_path_params, path_params)))
+        # The call's URL, rendered once before auth: the template with its path and query parameters, the API-wide
+        # ones folded in -- what the hooks are told. Every result and exception carries its safe form, cut to the
+        # path -- no query, no userinfo -- so nothing a parameter places in a query reaches a message. send()
+        # renders the full URL again per attempt, auth's query params included.
+        url = build_url(
+            url_template,
+            path_params=resolve_params(self.global_path_params, path_params),
+            query_params=resolve_params(self.global_query_params, query_params),
+        )
+        call_url = safe_url(url)
         log = HttpLog(
             options=self.logging_options, log_level_override=options.log_level, started_at=time.perf_counter()
         )
+        # The client's hooks, then the call's -- appended, never substituted. Both are this flavour's own hook type:
+        # RequestOptions is the synchronous twin. Each is resolved here, a dict of functions into one hook each.
+        # One context per call, shared by every attempt and every hook.
+        hooks = (*_coerce_hooks(self.hooks), *_coerce_hooks(options.hooks))
+        hook_context = HookContext(method=http_method, url=url, request_options=options)
 
         def send() -> HttpResponse:
             try:
@@ -187,6 +220,10 @@ class RawClient(BaseRawClient[HttpClient]):
                 auth=auth,
                 options=options,
             )
+            # After auth and before the log line, so the request line shows what a hook changed. A hook that
+            # raises leaves before anything was reported, so ``failed`` writes nothing for it.
+            for hook in hooks:
+                request = hook.before_request(request, hook_context)
             log.request_sending(request)
             return self.http_client.send(request)
 
@@ -197,6 +234,8 @@ class RawClient(BaseRawClient[HttpClient]):
                 is_retryable=is_retryable_body(body) and http_method in retry_options.http_methods_to_retry,
                 send=send,
                 log=log,
+                hooks=hooks,
+                hook_context=hook_context,
             )
         except SdkConnectionError as error:
             # No response on the last attempt. Logged as the library's exception on ``__cause__``, which may be None
@@ -261,6 +300,8 @@ class RawClient(BaseRawClient[HttpClient]):
         is_retryable: bool,
         send: Callable[[], HttpResponse],
         log: HttpLog,
+        hooks: Sequence[SdkHook],
+        hook_context: HookContext,
     ) -> HttpResponse:
         """Send, and send again while every gate agrees; hand back the attempt that was kept.
 
@@ -268,8 +309,10 @@ class RawClient(BaseRawClient[HttpClient]):
         credential a 401 invalidated is re-obtained rather than resent -- reports it to ``log`` and
         sends it. Each head is reported to ``log`` as it arrives, with whether it is a success by the
         same 2xx rule ``execute`` shapes the result by, so the scope holds no status rule of its own;
-        if that report, or the 401 invalidation after it, raises -- a log handler or the caller's
-        scheme -- the response is closed before the exception leaves. The retry line is written after
+        the hooks see each response after it is reported and after the 401 check, and the one the last hook
+        returns is the one the gate reads and the one handed back. If that report, the 401
+        invalidation or a hook after them raises -- a log handler, the caller's scheme or a hook --
+        the response is closed before the exception leaves. The retry line is written after
         the discarded response is closed and before the wait, so nothing a log handler does there can
         hold a connection. A 401 invalidates the scheme's cache per attempt but is not retried under
         the shipped defaults.
@@ -281,9 +324,12 @@ class RawClient(BaseRawClient[HttpClient]):
                 body's replayability, folded once per call since neither changes between attempts.
             send: Builds, reports and sends one attempt's request.
             log: The call's log scope.
+            hooks: The call's hooks, the client's first; each is handed every attempt's response as the previous
+                one returned it, and returns the one the next receives.
+            hook_context: The call they are told about.
 
         Returns:
-            The kept attempt's response, open and its body unread.
+            The kept attempt's response as the hooks returned it, open.
 
         Raises:
             SdkConnectionError: The transport's own, from the last attempt, once every gate has refused;
@@ -303,17 +349,25 @@ class RawClient(BaseRawClient[HttpClient]):
                 time.sleep(wait_seconds)
                 continue
 
-            status_code, response_headers = response.status_code, dict(response.headers)
+            status_code = response.status_code
 
-            # The two calls here run code the SDK does not own -- a log handler, the caller's scheme -- while the
-            # response is open; one that raises must not leave the connection held.
+            # The calls here run code the SDK does not own -- a log handler, the caller's scheme, the caller's
+            # hooks -- while the response is open; one that raises must not leave the connection held. The hooks
+            # run after the response line and the 401 check, on every attempt, so a hook that raises cannot keep a
+            # stale credential cached. The line and the check read the transport's response: what the server sent.
             try:
-                log.response_received(status_code, response_headers, is_success=200 <= status_code < 300)
+                log.response_received(status_code, dict(response.headers), is_success=200 <= status_code < 300)
                 if status_code == 401:
                     invalidate(auth_scheme)
+                for hook in hooks:
+                    response = hook.after_response(response, hook_context)
             except BaseException:
+                # The latest response: a hook that replaced the transport's owns the one it was handed.
                 response.close()
                 raise
+
+            # From here on, the response the hooks handed back: the gate, Retry-After and the result read it.
+            status_code, response_headers = response.status_code, dict(response.headers)
 
             if not (
                 is_retryable
@@ -345,6 +399,10 @@ class AsyncRawClient(BaseRawClient[AsyncHttpClient]):
     carry identical names throughout this SDK, and the transport already makes the
     flavor unambiguous."""
 
+    hooks: Sequence[AsyncSdkHook] | AsyncSdkHooksDict = ()
+    """The client's hooks, run on every attempt of every call -- before the call's own: hook objects, or coroutine
+    functions keyed by event. Each is awaited. Resolved into hooks by ``execute``, once per call."""
+
     async def execute(
         self,
         *,
@@ -357,7 +415,7 @@ class AsyncRawClient(BaseRawClient[AsyncHttpClient]):
         auth_scheme: AsyncAuthScheme = no_auth,
         decoder: AsyncResponseDecoder[T],
         error_mapper: ErrorMapper[E],
-        request_options: RequestOptionsOrDict | None = None,
+        request_options: AsyncRequestOptionsOrDict | None = None,
     ) -> ApiResult[T, E]:
         """Send a request and shape the response into a result.
 
@@ -390,22 +448,34 @@ class AsyncRawClient(BaseRawClient[AsyncHttpClient]):
                 in ``scheme_failures``, in order, and the group's ``AnySchemesError`` is the cause.
             SdkConnectionError: If the last attempt produced no response, or the body failed after the
                 head arrived -- its leaf ``SdkTimeoutError`` where the window ran out. Raised by the
-                transport itself, naming the call; the library's own exception is the cause.
+                transport itself, naming the call; the library's own exception is the cause. A hook's
+                ``before_request`` may raise one too, to have its attempt retried as a failed send; raised
+                from ``after_response`` it ends the call unretried.
             ResponseDecodeError: If a 2xx body, or a documented error body, is rejected by its declared
                 type; the decoder's own exception is the cause. Not an API error, so it propagates in
                 both response modes.
             Exception: Anything else as it was raised -- a scheme's, a caller's decoder's, a log
-                handler's."""
-        options = RequestOptions.coerce(request_options)
+                handler's, a hook's."""
+        options = AsyncRequestOptions.coerce(request_options)
         retry_options = apply_retry_overrides(options, self.retry_options)
-        # The safe URL every result and exception carries: the template with its path parameters rendered, cut to
-        # the path -- no query, no userinfo -- so nothing a parameter or a scheme places in a query reaches a
-        # message. No query is rendered here, since the cut would drop it; send() renders the full URL, auth's
-        # query params included, per attempt.
-        call_url = safe_url(build_url(url_template, path_params=resolve_params(self.global_path_params, path_params)))
+        # The call's URL, rendered once before auth: the template with its path and query parameters, the API-wide
+        # ones folded in -- what the hooks are told. Every result and exception carries its safe form, cut to the
+        # path -- no query, no userinfo -- so nothing a parameter places in a query reaches a message. send()
+        # renders the full URL again per attempt, auth's query params included.
+        url = build_url(
+            url_template,
+            path_params=resolve_params(self.global_path_params, path_params),
+            query_params=resolve_params(self.global_query_params, query_params),
+        )
+        call_url = safe_url(url)
         log = HttpLog(
             options=self.logging_options, log_level_override=options.log_level, started_at=time.perf_counter()
         )
+        # The client's hooks, then the call's -- appended, never substituted. Both are this flavour's own hook type:
+        # AsyncRequestOptions is the asynchronous twin. Each is resolved here, a dict of functions into one hook each.
+        # One context per call, shared by every attempt and every hook.
+        hooks = (*_async_coerce_hooks(self.hooks), *_async_coerce_hooks(options.hooks))
+        hook_context = AsyncHookContext(method=http_method, url=url, request_options=options)
 
         async def send() -> AsyncHttpResponse:
             try:
@@ -428,6 +498,10 @@ class AsyncRawClient(BaseRawClient[AsyncHttpClient]):
                 auth=auth,
                 options=options,
             )
+            # After auth and before the log line, so the request line shows what a hook changed. A hook that
+            # raises leaves before anything was reported, so ``failed`` writes nothing for it.
+            for hook in hooks:
+                request = await hook.before_request(request, hook_context)
             log.request_sending(request)
             return await self.http_client.send(request)
 
@@ -438,6 +512,8 @@ class AsyncRawClient(BaseRawClient[AsyncHttpClient]):
                 is_retryable=is_retryable_body(body) and http_method in retry_options.http_methods_to_retry,
                 send=send,
                 log=log,
+                hooks=hooks,
+                hook_context=hook_context,
             )
         except SdkConnectionError as error:
             # No response on the last attempt. Logged as the library's exception on ``__cause__``, which may be None
@@ -502,11 +578,14 @@ class AsyncRawClient(BaseRawClient[AsyncHttpClient]):
         is_retryable: bool,
         send: Callable[[], Awaitable[AsyncHttpResponse]],
         log: HttpLog,
+        hooks: Sequence[AsyncSdkHook],
+        hook_context: AsyncHookContext,
     ) -> AsyncHttpResponse:
         """The awaited twin of :meth:`RawClient._attempt_send`, with that contract exactly.
 
-        Three tokens differ: ``send`` is awaited, the close is ``aclose``, and the wait is
-        ``asyncio.sleep``, so it yields the event loop instead of blocking it."""
+        Four things differ: ``send`` is awaited, the close is ``aclose``, the wait is
+        ``asyncio.sleep``, so it yields the event loop instead of blocking it, and a hook's
+        ``after_response`` is awaited."""
         for retries_taken in range(retry_options.max_retries + 1):
             try:
                 response = await send()
@@ -522,17 +601,25 @@ class AsyncRawClient(BaseRawClient[AsyncHttpClient]):
                 await asyncio.sleep(wait_seconds)
                 continue
 
-            status_code, response_headers = response.status_code, dict(response.headers)
+            status_code = response.status_code
 
-            # The two calls here run code the SDK does not own -- a log handler, the caller's scheme -- while the
-            # response is open; one that raises must not leave the connection held.
+            # The calls here run code the SDK does not own -- a log handler, the caller's scheme, the caller's
+            # hooks -- while the response is open; one that raises must not leave the connection held. The hooks
+            # run after the response line and the 401 check, on every attempt, so a hook that raises cannot keep a
+            # stale credential cached. The line and the check read the transport's response: what the server sent.
             try:
-                log.response_received(status_code, response_headers, is_success=200 <= status_code < 300)
+                log.response_received(status_code, dict(response.headers), is_success=200 <= status_code < 300)
                 if status_code == 401:
                     invalidate(auth_scheme)
+                for hook in hooks:
+                    response = await hook.after_response(response, hook_context)
             except BaseException:
+                # The latest response: a hook that replaced the transport's owns the one it was handed.
                 await response.aclose()
                 raise
+
+            # From here on, the response the hooks handed back: the gate, Retry-After and the result read it.
+            status_code, response_headers = response.status_code, dict(response.headers)
 
             if not (
                 is_retryable
